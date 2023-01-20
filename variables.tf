@@ -78,6 +78,12 @@ variable "node_role_arn" {
   }
 }
 
+variable "node_role_explicit_self_trust" {
+  description = "Toggle for creating an explicit statement in the trust policy so that the Node Group IAM role can assume itself."
+  type        = bool
+  default     = true
+}
+
 variable "security_group_description" {
   type        = string
   default     = "Allow SSH access to all nodes in the nodeGroup"

@@ -1,10 +1,15 @@
 locals {
   create_role       = local.enabled && length(var.node_role_arn) == 0
   aws_policy_prefix = format("arn:%s:iam::aws:policy", join("", data.aws_partition.current.*.partition))
+  node_role_arn     = format("arn:aws:iam::%s:role/%s", join("", data.aws_caller_identity.current.*.account_id), module.label.id)
 }
 
 data "aws_partition" "current" {
   count = local.create_role ? 1 : 0
+}
+
+data "aws_caller_identity" "current" {
+  count = local.enabled ? 1 : 0
 }
 
 data "aws_iam_policy_document" "assume_role" {
@@ -17,6 +22,20 @@ data "aws_iam_policy_document" "assume_role" {
     principals {
       type        = "Service"
       identifiers = ["ec2.amazonaws.com"]
+    }
+  }
+
+  dynamic "statement" {
+    for_each = var.node_role_explicit_self_trust ? [1] : []
+    content {
+      sid = "AllowSelfAssume"
+      effect  = "Allow"
+      actions = ["sts:AssumeRole"]
+
+      principals {
+        type        = "AWS"
+        identifiers = [local.node_role_arn]
+      }
     }
   }
 }
