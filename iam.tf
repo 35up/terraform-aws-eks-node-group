@@ -2,6 +2,7 @@ locals {
   create_role       = local.enabled && length(var.node_role_arn) == 0
   aws_policy_prefix = format("arn:%s:iam::aws:policy", join("", data.aws_partition.current.*.partition))
   node_role_arn     = format("arn:aws:iam::%s:role/%s", join("", data.aws_caller_identity.current.*.account_id), module.label.id)
+  account_principal = format("arn:aws:iam::%s:root", join("", data.aws_caller_identity.current.*.account_id))
 }
 
 data "aws_partition" "current" {
@@ -34,7 +35,13 @@ data "aws_iam_policy_document" "assume_role" {
 
       principals {
         type        = "AWS"
-        identifiers = [local.node_role_arn]
+        identifiers = [local.account_principal]
+      }
+
+      condition {
+        test     = "ArnEquals"
+        variable = "aws:PrincipalArn"
+        values   = [local.node_role_arn]
       }
     }
   }
