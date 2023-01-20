@@ -66,6 +66,18 @@ variable "subnet_ids" {
   type        = list(string)
 }
 
+variable "node_role_arn" {
+  type        = list(string)
+  default     = []
+  description = "If provided, assign workers the given role, which this module will not modify"
+  validation {
+    condition = (
+      length(var.node_role_arn) < 2
+    )
+    error_message = "You may not specify more than one `node_role_arn`."
+  }
+}
+
 variable "security_group_description" {
   type        = string
   default     = "Allow SSH access to all nodes in the nodeGroup"
