@@ -57,7 +57,7 @@ locals {
   ng_needs_remote_access = local.remote_access_enabled && ! local.use_launch_template
   ng = {
     cluster_name  = var.cluster_name
-    node_role_arn = join("", aws_iam_role.default.*.arn)
+    node_role_arn = local.create_role ? join("", aws_iam_role.default.*.arn) : var.node_role_arn[0]
     # Keep sorted so that change in order does not trigger replacement via random_pet
     subnet_ids = sort(var.subnet_ids)
     disk_size  = local.use_launch_template ? null : var.disk_size
