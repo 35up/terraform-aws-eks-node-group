@@ -95,7 +95,7 @@ resource "aws_iam_role_policy_attachment" "amazon_eks_worker_node_autoscale_poli
 }
 
 resource "aws_iam_role_policy_attachment" "amazon_eks_cni_policy" {
-  count      = local.create_role ? 1 : 0
+  count      = local.create_role && var.attach_canned_eks_cni_policy ? 1 : 0
   policy_arn = format("%s/%s", local.aws_policy_prefix, "AmazonEKS_CNI_Policy")
   role       = join("", aws_iam_role.default.*.name)
 }

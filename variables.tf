@@ -359,3 +359,14 @@ variable "metadata_http_tokens" {
   type        = string
   description = "Whether or not the metadata service requires session tokens, also referred to as Instance Metadata Service Version 2 (IMDSv2). Can be optional or required"
 }
+
+variable "attach_canned_eks_cni_policy" {
+  default     = false
+  type        = bool
+  description =  <<-EOT
+    Toggle for attaching the AWS managed EKS CNI policy to the worker node's
+    role. If using the EKS addons to handle the AWS VPC CNI plugin, AWS
+    recommends that this policy should not be attached directly to the node's
+    IAM role but rather be specified separately in the addon.
+    EOT
+}
