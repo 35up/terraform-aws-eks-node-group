@@ -336,6 +336,12 @@ variable "disk_type" {
   description = "If provided, will be used as volume type of created ebs disk on EC2 instances"
 }
 
+variable "ebs_optimized" {
+  type        = bool
+  default     = true
+  description = "If toggled, the launched EC2 instance will be EBS-optimized"
+}
+
 variable "launch_template_disk_encryption_kms_key_id" {
   type        = string
   default     = ""
