@@ -68,6 +68,8 @@ resource "aws_launch_template" "default" {
     }
   }
 
+  ebs_optimized = var.ebs_optimized
+
   name_prefix            = module.label.id
   update_default_version = true
 
