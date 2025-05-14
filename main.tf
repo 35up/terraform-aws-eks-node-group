@@ -1,38 +1,49 @@
 locals {
   enabled = module.this.enabled
 
-  # See https://aws.amazon.com/blogs/containers/introducing-launch-template-and-custom-ami-support-in-amazon-eks-managed-node-groups/
-  features_require_ami             = local.enabled && local.need_bootstrap
-  configured_ami_image_id          = var.ami_image_id == null ? "" : var.ami_image_id
-  need_ami_id                      = local.enabled ? local.features_require_ami && length(local.configured_ami_image_id) == 0 : false
-  need_imds_settings               = var.metadata_http_endpoint != "enabled" || var.metadata_http_put_response_hop_limit != 1 || var.metadata_http_tokens != "optional"
-  features_require_launch_template = local.enabled ? length(var.resources_to_tag) > 0 || local.need_userdata || local.features_require_ami || local.need_imds_settings : false
-  remote_access_enabled            = local.enabled && var.remote_access_enabled
-  need_remote_access_sg            = local.generate_launch_template && local.remote_access_enabled
-  get_cluster_data                 = local.enabled ? (local.need_cluster_kubernetes_version || local.need_bootstrap || local.need_remote_access_sg) : false
-  autoscaler_enabled               = var.enable_cluster_autoscaler != null ? var.enable_cluster_autoscaler : var.cluster_autoscaler_enabled == true
-  #
-  # Set up tags for autoscaler and other resources
-  #
-  autoscaler_enabled_tags = {
-    "k8s.io/cluster-autoscaler/${var.cluster_name}" = "owned"
-    "k8s.io/cluster-autoscaler/enabled"             = "true"
-  }
-  autoscaler_kubernetes_label_tags = {
-    for label, value in var.kubernetes_labels : format("k8s.io/cluster-autoscaler/node-template/label/%v", label) => value
-  }
-  autoscaler_kubernetes_taints_tags = {
-    for label, value in var.kubernetes_taints : format("k8s.io/cluster-autoscaler/node-template/taint/%v", label) => value
-  }
-  autoscaler_tags = merge(local.autoscaler_enabled_tags, local.autoscaler_kubernetes_label_tags, local.autoscaler_kubernetes_taints_tags)
+  # Kubernetes version priority (first one to be set wins)
+  # 1. var.kubernetes_version
+  # 2. data.eks_cluster.this.kubernetes_version
+  use_cluster_kubernetes_version  = !local.enabled || length(var.kubernetes_version) == 0
+  need_cluster_kubernetes_version = local.use_cluster_kubernetes_version
+  resolved_kubernetes_version     = local.use_cluster_kubernetes_version ? one(data.aws_eks_cluster.this[*].version) : var.kubernetes_version[0]
 
-  node_tags = merge(
-    module.label.tags,
-    {
-      "kubernetes.io/cluster/${var.cluster_name}" = "owned"
-    }
-  )
-  node_group_tags = merge(local.node_tags, local.autoscaler_enabled ? local.autoscaler_tags : {})
+  # See https://aws.amazon.com/blogs/containers/introducing-launch-template-and-custom-ami-support-in-amazon-eks-managed-node-groups/
+  features_require_ami = local.enabled && local.suppress_bootstrap
+
+  configured_ami_image_id = var.ami_image_id == null ? "" : var.ami_image_id
+
+  need_ami_id = local.enabled ? (
+    local.features_require_ami &&
+    length(local.configured_ami_image_id) == 0
+  ) : false
+
+  need_imds_settings = var.metadata_http_endpoint != "enabled" || var.metadata_http_put_response_hop_limit != 1 || var.metadata_http_tokens != "optional"
+
+  features_require_launch_template = local.enabled ? (
+    length(var.resources_to_tag) > 0 ||
+    local.features_require_ami ||
+    local.need_imds_settings
+  ) : false
+
+  remote_access_enabled = local.enabled && var.remote_access_enabled
+
+  need_remote_access_sg = local.generate_launch_template && local.remote_access_enabled
+
+  get_cluster_data = local.enabled ? (
+    local.need_cluster_kubernetes_version ||
+    local.suppress_bootstrap ||
+    local.need_remote_access_sg
+  ) : false
+
+  taint_effect_map = {
+    NO_SCHEDULE        = "NoSchedule"
+    NO_EXECUTE         = "NoExecute"
+    PREFER_NO_SCHEDULE = "PreferNoSchedule"
+  }
+
+  node_tags       = module.label.tags
+  node_group_tags = module.label.tags
 
   # hack to prevent failure when var.remote_access_enabled is false
   vpc_id = try(data.aws_eks_cluster.this[0].vpc_config[0].vpc_id, null)
@@ -54,23 +65,36 @@ data "aws_eks_cluster" "this" {
 
 # Support keeping 2 node groups in sync by extracting common variable settings
 locals {
-  ng_needs_remote_access = local.remote_access_enabled && ! local.use_launch_template
+  ng_needs_remote_access = local.remote_access_enabled && !local.use_launch_template
   ng = {
     cluster_name  = var.cluster_name
     node_role_arn = local.create_role ? join("", aws_iam_role.default.*.arn) : var.node_role_arn[0]
+
     # Keep sorted so that change in order does not trigger replacement via random_pet
-    subnet_ids = sort(var.subnet_ids)
-    disk_size  = local.use_launch_template ? null : var.disk_size
+    # Allow for empty subnet_ids to be passed in when enabled=false
+    subnet_ids = sort(coalesce(var.subnet_ids, []))
+
+    disk_size = local.use_launch_template ? null : var.disk_size
+
     # Always supply instance types via the node group, not the launch template,
     # because node group supports up to 20 types but launch template does not.
     # See https://docs.aws.amazon.com/eks/latest/APIReference/API_CreateNodegroup.html#API_CreateNodegroup_RequestSyntax
     # Keep sorted so that change in order does not trigger replacement via random_pet
-    instance_types  = sort(var.instance_types)
-    ami_type        = local.launch_template_ami == "" ? var.ami_type : null
-    capacity_type   = var.capacity_type
-    labels          = var.kubernetes_labels == null ? {} : var.kubernetes_labels
-    release_version = local.launch_template_ami == "" ? var.ami_release_version : null
-    version         = length(compact([local.launch_template_ami, var.ami_release_version])) == 0 ? var.kubernetes_version : null
+    instance_types = sort(var.instance_types)
+
+    # ami_type is used by EKS to select the kind of userdata to supply for the instance to join the cluster,
+    # and to pick the right AMI (corresponding to the Kubernetes version) for the instance.
+    # We set the ami_type to `null` (`CUSTOM`) when we want our own userdata to replace the EKS-supplied userdata,
+    # use something other than the latest AMI version, or genuinely want to use a custom AMI.
+    ami_type = local.launch_template_ami == "" ? var.ami_type : null
+
+    version         = local.launch_template_ami == "" ? local.resolved_kubernetes_version : null
+    release_version = local.launch_template_ami == "" && length(var.ami_release_version) > 0 ? var.ami_release_version[0] : null
+
+    capacity_type = var.capacity_type
+    labels        = var.kubernetes_labels == null ? {} : var.kubernetes_labels
+
+    taints = var.kubernetes_taints
 
     tags = local.node_group_tags
 
@@ -81,8 +105,10 @@ locals {
     }
 
     # Configure remote access via Launch Template if we are using one
-    need_remote_access        = local.ng_needs_remote_access
-    ec2_ssh_key               = local.remote_access_enabled ? var.ec2_ssh_key : "none"
+    need_remote_access = local.ng_needs_remote_access
+
+    ec2_ssh_key = local.remote_access_enabled ? var.ec2_ssh_key : "none"
+
     source_security_group_ids = local.ng_needs_remote_access ? sort(concat(module.security_group.*.id, var.security_groups)) : []
   }
 }
@@ -94,25 +120,28 @@ resource "random_pet" "cbd" {
   length    = 1
 
   keepers = {
-    node_role_arn      = local.ng.node_role_arn
-    subnet_ids         = join(",", local.ng.subnet_ids)
-    disk_size          = local.ng.disk_size
-    instance_types     = join(",", local.ng.instance_types)
-    ami_type           = local.ng.ami_type
-    release_version    = local.ng.release_version
-    version            = local.ng.version
-    capacity_type      = local.ng.capacity_type
+    node_role_arn   = local.ng.node_role_arn
+    subnet_ids      = join(",", local.ng.subnet_ids)
+    disk_size       = local.ng.disk_size
+    instance_types  = join(",", local.ng.instance_types)
+    ami_type        = local.ng.ami_type
+    release_version = local.ng.release_version
+    version         = local.ng.version
+    capacity_type   = local.ng.capacity_type
+    ec2_ssh_key     = local.ng.need_remote_access ? local.ng.ec2_ssh_key : "handled by launch template"
+
     need_remote_access = local.ng.need_remote_access
-    ec2_ssh_key        = local.ng.need_remote_access ? local.ng.ec2_ssh_key : "handled by launch template"
+
     # Any change in security groups requires a new node group, because you cannot delete a security group while it is in use
     # and it will not automatically disassociate itself from instances or network interfaces.
     #
     # TODO: Once https://github.com/hashicorp/terraform/issues/25631 is fixed,
     #       actually track security groups by using
     #       source_security_group_ids = join(",", local.ng.source_security_group_ids, aws_security_group.remote_access.*.id)
-    #
+
     source_security_group_ids = local.need_remote_access_sg ? "generated for launch template" : join(",", local.ng.source_security_group_ids)
-    launch_template_id        = local.use_launch_template ? local.launch_template_id : "none"
+
+    launch_template_id = local.use_launch_template ? local.launch_template_id : "none"
   }
 }
 
@@ -124,7 +153,7 @@ resource "random_pet" "cbd" {
 # WARNING TO MAINTAINERS: both node groups should be kept exactly in sync
 # except for count, lifecycle, and node_group_name.
 resource "aws_eks_node_group" "default" {
-  count           = local.enabled && ! var.create_before_destroy ? 1 : 0
+  count           = local.enabled && !var.create_before_destroy ? 1 : 0
   node_group_name = module.label.id
 
   lifecycle {
@@ -158,6 +187,15 @@ resource "aws_eks_node_group" "default" {
     content {
       id      = local.launch_template_id
       version = local.launch_template_version
+    }
+  }
+
+  dynamic "taint" {
+    for_each = var.kubernetes_taints
+    content {
+      key    = taint.value["key"]
+      value  = taint.value["value"]
+      effect = taint.value["effect"]
     }
   }
 
@@ -221,6 +259,15 @@ resource "aws_eks_node_group" "cbd" {
     content {
       id      = local.launch_template_id
       version = local.launch_template_version
+    }
+  }
+
+  dynamic "taint" {
+    for_each = var.kubernetes_taints
+    content {
+      key    = taint.value["key"]
+      value  = taint.value["value"]
+      effect = taint.value["effect"]
     }
   }
 

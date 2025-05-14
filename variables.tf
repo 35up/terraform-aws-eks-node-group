@@ -1,15 +1,3 @@
-variable "enable_cluster_autoscaler" {
-  type        = bool
-  description = "(Deprecated, use `cluster_autoscaler_enabled`) Set true to allow Kubernetes Cluster Auto Scaler to scale the node group"
-  default     = null
-}
-
-variable "cluster_autoscaler_enabled" {
-  type        = bool
-  description = "Set true to label the node group so that the [Kubernetes Cluster Autoscaler](https://github.com/kubernetes/autoscaler/blob/master/cluster-autoscaler/cloudprovider/aws/README.md#auto-discovery-setup) will discover and autoscale it"
-  default     = null
-}
-
 variable "worker_role_autoscale_iam_enabled" {
   type        = bool
   default     = false
@@ -62,8 +50,8 @@ variable "min_size" {
 }
 
 variable "subnet_ids" {
-  description = "A list of subnet IDs to launch resources in"
   type        = list(string)
+  description = "A list of subnet IDs to launch resources in"
 }
 
 variable "node_role_arn" {
@@ -145,14 +133,14 @@ variable "ami_type" {
   type        = string
   description = <<-EOT
     Type of Amazon Machine Image (AMI) associated with the EKS Node Group.
-    Defaults to `AL2_x86_64`. Valid values: `AL2_x86_64`, `AL2_x86_64_GPU`, and `AL2_ARM_64`.
+    Defaults to `AL2_x86_64`. Valid values: `AL2_x86_64, AL2_x86_64_GPU, AL2_ARM_64, CUSTOM, BOTTLEROCKET_ARM_64, BOTTLEROCKET_x86_64, BOTTLEROCKET_ARM_64_NVIDIA, BOTTLEROCKET_x86_64_NVIDIA, AL2023_x86_64_STANDARD, AL2023_ARM_64_STANDARD`.
     EOT
   default     = "AL2_x86_64"
   validation {
     condition = (
-      contains(["AL2_x86_64", "AL2_x86_64_GPU", "AL2_ARM_64"], var.ami_type)
+      contains(["AL2_x86_64", "AL2_x86_64_GPU", "AL2_ARM_64", "CUSTOM", "BOTTLEROCKET_ARM_64", "BOTTLEROCKET_x86_64", "BOTTLEROCKET_ARM_64_NVIDIA", "BOTTLEROCKET_x86_64_NVIDIA", "AL2023_x86_64_STANDARD", "AL2023_ARM_64_STANDARD"], var.ami_type)
     )
-    error_message = "Var ami_type must be one of \"AL2_x86_64\", \"AL2_x86_64_GPU\", and \"AL2_ARM_64\"."
+    error_message = "Var ami_type must be one of \"AL2_x86_64\",\"AL2_x86_64_GPU\",\"AL2_ARM_64\",\"BOTTLEROCKET_ARM_64\",\"BOTTLEROCKET_x86_64\",\"BOTTLEROCKET_ARM_64_NVIDIA\",\"BOTTLEROCKET_x86_64_NVIDIA\", \"AL2023_x86_64_STANDARD\", \"AL2023_ARM_64_STANDARD\", or \"CUSTOM\"."
   }
 }
 
@@ -203,26 +191,34 @@ variable "kubernetes_labels" {
 }
 
 variable "kubernetes_taints" {
-  type        = map(string)
-  description = "Key-value mapping of Kubernetes taints."
-  default     = {}
+  type = list(object({
+    key    = string
+    value  = optional(string)
+    effect = string
+  }))
+  description = <<-EOT
+    List of `key`, `value`, `effect` objects representing Kubernetes taints.
+    `effect` must be one of `NO_SCHEDULE`, `NO_EXECUTE`, or `PREFER_NO_SCHEDULE`.
+    `key` and `effect` are required, `value` may be null.
+    EOT
+  default     = []
 }
 
 variable "kubelet_additional_options" {
-  type        = string
+  type        = list(string)
   description = <<-EOT
     Additional flags to pass to kubelet.
     DO NOT include `--node-labels` or `--node-taints`,
     use `kubernetes_labels` and `kubernetes_taints` to specify those."
     EOT
-  default     = ""
   validation {
-    condition = (length(compact([var.kubelet_additional_options])) == 0 ? true :
-      length(regexall("--node-labels", var.kubelet_additional_options)) == 0 &&
-      length(regexall("--node-taints", var.kubelet_additional_options)) == 0
+    condition = (length(compact(var.kubelet_additional_options)) == 0 ? true :
+      length(regexall("--node-labels", join(" ", var.kubelet_additional_options))) == 0 &&
+      length(regexall("--node-taints", join(" ", var.kubelet_additional_options))) == 0
     )
     error_message = "Var kubelet_additional_options must not contain \"--node-labels\" or \"--node-taints\".  Use `kubernetes_labels` and `kubernetes_taints` to specify labels and taints."
   }
+  default = []
 }
 
 variable "ami_image_id" {
@@ -232,27 +228,44 @@ variable "ami_image_id" {
 }
 
 variable "ami_release_version" {
-  type        = string
-  description = "EKS AMI version to use, e.g. \"1.16.13-20200821\" (no \"v\"). Defaults to latest version for Kubernetes version."
-  default     = null
+  type        = list(string)
+  description = <<-EOT
+    The EKS AMI "release version" to use. Defaults to the latest recommended version.
+    For Amazon Linux, it is the "Release version" from [Amazon AMI Releases](https://github.com/awslabs/amazon-eks-ami/releases)
+    For Bottlerocket, it is the release tag from [Bottlerocket Releases](https://github.com/bottlerocket-os/bottlerocket/releases) without the "v" prefix.
+    Note that unlike AMI names, release versions never include the "v" prefix.
+    Examples:
+      AL2: 1.29.3-20240531
+      Bottlerocket: 1.2.0 or 1.2.0-ccf1b754
+    EOT
+  # Normally we would not validate this input and instead allow the AWS API to validate it,
+  # but in this case, our AMI selection logic depends on it being in a format we expect,
+  # so even if AWS adds options in the future, we need to ensure it is in a format we can handle.
   validation {
     condition = (
-      length(compact([var.ami_release_version])) == 0 ? true : length(regexall("^\\d+\\.\\d+\\.\\d+-\\d+$", var.ami_release_version)) == 1
+      length(var.ami_release_version) == 0 ? true : length(
+        # 1.2.3 with optional -20240531 or -7452c37e   or 1.2.3               or 1.2-2024.04.09
+      regexall("(^\\d+\\.\\d+\\.\\d+(-[\\da-f]{8})?$)|(^\\d+\\.\\d+\\.\\d+$)|(^\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+$)", var.ami_release_version[0])) == 1
     )
-    error_message = "Var ami_release_version, if supplied, must be like  \"1.16.13-20200821\" (no \"v\")."
+    error_message = <<-EOT
+        Var ami_release_version, if supplied, must be like
+          Amazon Linux 2 or 2023: 1.29.3-20240531
+          Bottlerocket: 1.18.0 or 1.18.0-7452c37e # note commit hash prefix is 8 characters, not GitHub's default 7
+        EOT
   }
+  default = []
 }
 
 variable "kubernetes_version" {
-  type        = string
+  type        = list(string)
   description = "Kubernetes version. Defaults to EKS Cluster Kubernetes version. Terraform will only perform drift detection if a configuration value is provided"
-  default     = null
   validation {
     condition = (
-      length(compact([var.kubernetes_version])) == 0 ? true : length(regexall("^\\d+\\.\\d+$", var.kubernetes_version)) == 1
+      length(var.kubernetes_version) == 0 ? true : length(regexall("^\\d+\\.\\d+$", var.kubernetes_version[0])) == 1
     )
     error_message = "Var kubernetes_version, if supplied, must be like \"1.16\" (no patch level)."
   }
+  default = []
 }
 
 variable "module_depends_on" {
@@ -293,35 +306,41 @@ variable "resources_to_tag" {
 }
 
 variable "before_cluster_joining_userdata" {
-  type        = string
-  default     = ""
+  type        = list(string)
   description = "Additional `bash` commands to execute on each worker node before joining the EKS cluster (before executing the `bootstrap.sh` script). For more info, see https://kubedex.com/90-days-of-aws-eks-in-production"
+  default     = []
 }
 
 variable "after_cluster_joining_userdata" {
-  type        = string
-  default     = ""
+  type        = list(string)
   description = "Additional `bash` commands to execute on each worker node after joining the EKS cluster (after executing the `bootstrap.sh` script). For more info, see https://kubedex.com/90-days-of-aws-eks-in-production"
+  default     = []
 }
 
 variable "bootstrap_additional_options" {
-  type        = string
-  default     = ""
-  description = "Additional options to bootstrap.sh. DO NOT include `--kubelet-additional-args`, use `kubelet_additional_args` var instead."
+  type        = list(string)
+  description = "Additional options to bootstrap.sh. DO NOT include `--kubelet-additional-args`, use `kubelet_additional_options` var instead. Not used with AL2023 AMI types."
+  default     = []
 }
 
 variable "userdata_override_base64" {
-  type        = string
-  default     = null
+  type        = list(string)
   description = <<-EOT
     Many features of this module rely on the `bootstrap.sh` provided with Amazon Linux, and this module
     may generate "user data" that expects to find that script. If you want to use an AMI that is not
-    compatible with the Amazon Linux `bootstrap.sh` initialization, then use `userdata_override_base64` to provide
+    compatible with the userdata generated by this module, then use `userdata_override_base64` to provide
     your own (Base64 encoded) user data. Use "" to prevent any user data from being set.
 
     Setting `userdata_override_base64` disables `kubernetes_taints`, `kubelet_additional_options`,
     `before_cluster_joining_userdata`, `after_cluster_joining_userdata`, and `bootstrap_additional_options`.
     EOT
+  default     = []
+  validation {
+    condition = (
+      length(var.userdata_override_base64) < 2
+    )
+    error_message = "You may not specify more than one `userdata_override_base64`."
+  }
 }
 
 variable "permissions_boundary" {
